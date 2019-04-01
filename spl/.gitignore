@@ -22,7 +22,6 @@
 .libs
 .DS_Store
 Makefile
-Makefile.in
 
 #
 # Top level generated files specific to this top level dir
