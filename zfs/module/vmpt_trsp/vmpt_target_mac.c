@@ -132,7 +132,7 @@ vmptt_mac_submit_tran(vmptt_xmit_t *xm_data, struct sk_buff *skbp)
 }
 */
 
-static void __init
+static int __init
 vmptt_mac_init(void)
 {
 	struct net_device *dev = NULL;
@@ -141,6 +141,7 @@ vmptt_mac_init(void)
 		cmn_err(CE_NOTE, "%s:netdev_name:%s,netdev_mc:",
 			__func__, dev->name);
 	}
+	return 0;
 }
 
 static void __exit

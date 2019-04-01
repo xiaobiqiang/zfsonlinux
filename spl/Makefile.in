@@ -123,7 +123,7 @@ DIST_COMMON = $(srcdir)/config/rpm.am $(srcdir)/config/deb.am \
 	$(top_srcdir)/module/spl/Makefile.in \
 	$(top_srcdir)/module/splat/Makefile.in \
 	$(srcdir)/spl.release.in $(am__extra_HEADERS_DIST) AUTHORS \
-	COPYING config/config.guess config/config.sub \
+	COPYING config/config.guess config/config.sub config/depcomp \
 	config/install-sh config/missing config/ltmain.sh \
 	$(top_srcdir)/config/config.guess \
 	$(top_srcdir)/config/config.sub \
