@@ -7,6 +7,23 @@
 #include <linux/device.h>
 #include <linux/netdevice.h>
 #include <sys/cmn_err.h>
+#include <linux/if.h>
+#include <linux/slab.h>
+#include <uapi/linux/utsname.h>
+#include <sys/kobj.h>
+#include <sys/kmem.h>
+#include <sys/debug.h>
+#include <sys/nvpair.h>
+#include <sys/nvpair_impl.h>
+#include <linux/types.h>
+#include <sys/types.h>
+
+
+#define VMPTT_HOSTNAME_LEN	16
+#define ETHER_ADDR_LEN 		6
+#define VMPTT_CFG_FILE		"/etc/vmptt_trsp.cache"
+#define	VMPTT_CFG_IFNAME	"if_name"
+
 /*
 #define ETHER_ADDR_LEN 		6
 #define VMPTT_MAC_MAGIC		0x12345678
@@ -132,19 +149,149 @@ vmptt_mac_submit_tran(vmptt_xmit_t *xm_data, struct sk_buff *skbp)
 }
 */
 
+struct vmptt_host_attr {
+	struct list_head entry;
+	s8	hostname[VMPTT_HOSTNAME_LEN];
+	u32	hostid;
+	s8 	if_name[IFNAMSIZ];
+	u8	if_mac[ETHER_ADDR_LEN];
+	u8	pad[2];
+};
+
+struct vmptt_mac_info {
+	struct vmptt_host_attr *lc_p;
+	struct net_device	   *lc_netdev;
+	struct list_head	   *hosts_head;
+//	struct nvlist		   *lc_nvl;
+	/* local host first */
+	struct vmptt_host_attr	hosts;
+	/* is if_name been configed? */
+	boolean_t				is_enabled;
+};
+
+static struct vmptt_mac_info *gp_vmptt_info = NULL;
+
+static s32
+vmptt_mac_load_config(vmptt_mac_info *pinf)
+{
+	s32 err = 0;
+	struct new_utsname *sys = utsname();
+	struct vmptt_host_attr *attr = pinf->lc_p;
+	struct net_device *dev = NULL;
+	boolean_t found_netdev = B_FALSE;
+	void *buf = NULL;
+	nvlist_t *nvlist = NULL;
+	const char *pathname = VMPTT_CFG_FILE;
+	struct _buf *file = NULL;
+	u64 fsize = 0;
+
+	INIT_LIST_HEAD(&attr->entry);
+	attr->hostid = zone_get_hostid(NULL);
+	strncpy(attr->hostname, sys->sysname, VMPTT_HOSTNAME_LEN);
+	
+	file = kobj_open_file(pathname);
+	if (file == (struct _buf *)-1)
+		return -ENOENT;
+
+	err = kobj_get_filesize(file, &fsize);
+	if (!err) 
+		goto out;
+
+	buf = kmem_alloc(fsize, KM_SLEEP);
+	err = kobj_read_file(file, buf, fsize, 0)
+	if (err < 0)
+		goto out;
+
+	err = nvlist_unpack(buf, fsize, &nvlist, KM_SLEEP);
+	if (err != 0)
+		goto out;
+
+	if ( ((err = nvlist_lookup_string(nvlist, 
+			VMPTT_CFG_IFNAME, &attr->if_name)) != 0) ) {
+		goto free_nvl;
+	}
+
+	for_each_netdev(&init_net, dev) {
+		if ( (strcmp(attr->if_name, dev->name) == 0) &&
+			 (dev->addr_len == ETHER_ADDR_LEN) ) {
+			bcopy(dev->dev_addr, 
+				attr->if_mac, ETHER_ADDR_LEN)
+			found_netdev = B_TRUE;
+		}
+	}
+
+	if (!found_netdev)
+		err = -ENODEV;
+
+free_nvl:
+	nvlist_free(nvlist);
+out:
+	if (buf != NULL)
+		kmem_free(buf, fsize);
+
+	kobj_close_file(file);
+	return err;
+}
+
+static s32
+vmptt_mac_init_gbinfo(vmptt_mac_info **ppinf)
+{
+	s32 err = 0;
+	vmptt_mac_info *info = NULL;
+
+	info = kzalloc(sizeof(*info), GFP_KERNEL);
+	if (!info) {
+		pr_err("allocate mem for gbinfo failed in %s",
+			__func__);
+		err = -ENOMEM;
+		goto error;
+	}
+
+	info->lc_p = &info->hosts;
+	info->hosts_head = &info->hosts.entry;
+	err = vmptt_mac_load_config(info);
+	if (err == -ENOENT) {
+		pr_info("haven't config yet, maybe you need "
+				"to config to make vmpt_trsp work.");
+		err = 0;
+		info->is_enabled = B_FALSE;
+	} else if (err != 0) {
+		pr_info("something is wrong when loading stored "
+				"config. error is %d", err);
+		goto free_inf;
+	} else
+		info->is_enabled = B_TRUE;
+
+	*ppinf = info;
+	return 0;
+	
+free_inf:
+	kfree(info);
+error:
+	return err;
+}
+
 static int __init
 vmptt_mac_init(void)
 {
-	struct net_device *dev = NULL;
+	s32 err;
 	
-	for_each_netdev(&init_net, dev) {
-		cmn_err(CE_NOTE, "%s:netdev_name:%s,mc_len:%d,"
-			"netdev_mc:%02x:%02x:%02x:%02x:%02x:%02x",
-			__func__, dev->name, dev->addr_len, dev->dev_addr[0],
-			dev->dev_addr[1], dev->dev_addr[2], dev->dev_addr[3],
-			dev->dev_addr[4], dev->dev_addr[5]);
+	err = vmptt_mac_init_gbinfo(&gp_vmptt_info);
+	if (err) {
+		pr_err("initialize global configure info failed "
+			"when loading vmpt_trsp, error is %d", err);
+		goto out;
 	}
-	return 0;
+
+	if (!gp_vmptt_info->is_enabled) {
+		pr_info("vmpt_trsp haven't been configured yet.")
+		goto out;
+	}
+
+	/* TODO: broadcast message to inform selfup */
+	
+out:
+	return err;
 }
 
 static void __exit
