@@ -172,7 +172,7 @@ struct vmptt_mac_info {
 static struct vmptt_mac_info *gp_vmptt_info = NULL;
 
 static s32
-vmptt_mac_load_config(vmptt_mac_info *pinf)
+vmptt_mac_load_config(struct vmptt_mac_info *pinf)
 {
 	s32 err = 0;
 	struct new_utsname *sys = utsname();
@@ -234,7 +234,7 @@ out:
 }
 
 static s32
-vmptt_mac_init_gbinfo(vmptt_mac_info **ppinf)
+vmptt_mac_init_gbinfo(struct vmptt_mac_info **ppinf)
 {
 	s32 err = 0;
 	vmptt_mac_info *info = NULL;
@@ -284,7 +284,7 @@ vmptt_mac_init(void)
 	}
 
 	if (!gp_vmptt_info->is_enabled) {
-		pr_info("vmpt_trsp haven't been configured yet.")
+		pr_info("vmpt_trsp haven't been configured yet.");
 		goto out;
 	}
 
