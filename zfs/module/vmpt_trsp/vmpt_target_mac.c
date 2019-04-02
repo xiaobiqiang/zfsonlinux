@@ -9,7 +9,7 @@
 #include <sys/cmn_err.h>
 #include <linux/if.h>
 #include <linux/slab.h>
-#include <uapi/linux/utsname.h>
+#include <linux/utsname.h>
 #include <sys/kobj.h>
 #include <sys/kmem.h>
 #include <sys/debug.h>
@@ -198,7 +198,7 @@ vmptt_mac_load_config(struct vmptt_mac_info *pinf)
 		goto out;
 
 	buf = kmem_alloc(fsize, KM_SLEEP);
-	err = kobj_read_file(file, buf, fsize, 0)
+	err = kobj_read_file(file, buf, fsize, 0);
 	if (err < 0)
 		goto out;
 
@@ -207,7 +207,7 @@ vmptt_mac_load_config(struct vmptt_mac_info *pinf)
 		goto out;
 
 	if ( ((err = nvlist_lookup_string(nvlist, 
-			VMPTT_CFG_IFNAME, &attr->if_name)) != 0) ) {
+			VMPTT_CFG_IFNAME, (char **)&attr->if_name)) != 0) ) {
 		goto free_nvl;
 	}
 
@@ -215,7 +215,7 @@ vmptt_mac_load_config(struct vmptt_mac_info *pinf)
 		if ( (strcmp(attr->if_name, dev->name) == 0) &&
 			 (dev->addr_len == ETHER_ADDR_LEN) ) {
 			bcopy(dev->dev_addr, 
-				attr->if_mac, ETHER_ADDR_LEN)
+				attr->if_mac, ETHER_ADDR_LEN);
 			found_netdev = B_TRUE;
 		}
 	}
@@ -237,7 +237,7 @@ static s32
 vmptt_mac_init_gbinfo(struct vmptt_mac_info **ppinf)
 {
 	s32 err = 0;
-	vmptt_mac_info *info = NULL;
+	struct vmptt_mac_info *info = NULL;
 
 	info = kzalloc(sizeof(*info), GFP_KERNEL);
 	if (!info) {
