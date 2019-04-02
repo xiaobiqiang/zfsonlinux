@@ -138,8 +138,11 @@ vmptt_mac_init(void)
 	struct net_device *dev = NULL;
 	
 	for_each_netdev(&init_net, dev) {
-		cmn_err(CE_NOTE, "%s:netdev_name:%s,netdev_mc:",
-			__func__, dev->name);
+		cmn_err(CE_NOTE, "%s:netdev_name:%s,mc_len:%d,"
+			"netdev_mc:%02x:%02x:%02x:%02x:%02x:%02x",
+			__func__, dev->name, dev->addr_len, dev->dev_addr[0],
+			dev->dev_addr[1], dev->dev_addr[2], dev->dev_addr[3],
+			dev->dev_addr[4], dev->dev_addr[5]);
 	}
 	return 0;
 }
