@@ -38,6 +38,7 @@ KERNEL_H = \
 	$(top_srcdir)/include/sys/fcntl.h \
 	$(top_srcdir)/include/sys/file.h \
 	$(top_srcdir)/include/sys/idmap.h \
+	$(top_srcdir)/include/sys/id_space.h \
 	$(top_srcdir)/include/sys/int_limits.h \
 	$(top_srcdir)/include/sys/int_types.h \
 	$(top_srcdir)/include/sys/inttypes.h \
@@ -52,6 +53,8 @@ KERNEL_H = \
 	$(top_srcdir)/include/sys/mntent.h \
 	$(top_srcdir)/include/sys/modctl.h \
 	$(top_srcdir)/include/sys/mode.h \
+	$(top_srcdir)/include/sys/modhash.h \
+	$(top_srcdir)/include/sys/modhash_impl.h \
 	$(top_srcdir)/include/sys/mount.h \
 	$(top_srcdir)/include/sys/mutex.h \
 	$(top_srcdir)/include/sys/note.h \

@@ -40,10 +40,14 @@
 #include <sys/proc.h>
 #include <sys/kstat.h>
 #include <sys/file.h>
+#include <sys/modhash.h>
+#include <linux/utsname.h>
 #include <linux/ctype.h>
 #include <linux/kmod.h>
 #include <linux/math64_compat.h>
 #include <linux/proc_compat.h>
+
+
 
 char spl_version[32] = "SPL v" SPL_META_VERSION "-" SPL_META_RELEASE;
 EXPORT_SYMBOL(spl_version);
@@ -53,7 +57,7 @@ EXPORT_SYMBOL(spl_hostid);
 module_param(spl_hostid, ulong, 0644);
 MODULE_PARM_DESC(spl_hostid, "The system hostid.");
 
-proc_t p0 = { 0 };
+proc_t p0;
 EXPORT_SYMBOL(p0);
 
 #if BITS_PER_LONG == 32
@@ -522,7 +526,11 @@ static int __init
 spl_init(void)
 {
 	int rc = 0;
-
+	int hostid = 0;
+	char *hostname;
+	
+	bzero(&p0, sizeof (proc_t));
+	
 	if ((rc = spl_kvmem_init()))
 		goto out1;
 
@@ -550,10 +558,20 @@ spl_init(void)
 	if ((rc = spl_zlib_init()))
 		goto out9;
 
+	if ((rc = spl_modhash_init()))
+		goto out10;
+
 	printk(KERN_NOTICE "SPL: Loaded module v%s-%s%s\n", SPL_META_VERSION,
 	       SPL_META_RELEASE, SPL_DEBUG_STR);
-	return (rc);
 
+	hostid = zone_get_hostid(NULL);
+	hostname = utsname()->nodename;
+	printk(KERN_NOTICE "SPL: using hostname %s\n",
+			hostname);
+	
+	return (rc);
+out10:
+	spl_modhash_fini();
 out9:
 	spl_tsd_fini();
 out8:
@@ -592,6 +610,7 @@ spl_fini(void)
 	spl_rw_fini();
 	spl_mutex_fini();
 	spl_kvmem_fini();
+	spl_modhash_fini();
 }
 
 module_init(spl_init);

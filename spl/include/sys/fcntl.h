@@ -28,6 +28,11 @@
 
 #define F_FREESP 11
 
+#define	FCLUSTER		0x200000
+#define	FBackupMaster		0x400000
+#define	F_DT2_NO_UP_QUOTA		0x800000
+#define	F_MIGRATE_DATA	0x1000000
+
 #ifdef CONFIG_64BIT
 typedef struct flock flock64_t;
 #else

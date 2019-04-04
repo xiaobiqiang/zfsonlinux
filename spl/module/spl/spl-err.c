@@ -66,9 +66,11 @@ spl_panic(const char *file, const char *func, int line, const char *fmt, ...) {
 
 	/* Halt the thread to facilitate further debugging */
 	set_task_state(current, TASK_UNINTERRUPTIBLE);
+	panic("PANIC: %s\n", msg);
+	#if 0
 	while (1)
 		schedule();
-
+	#endif
 	/* Unreachable */
 	return (1);
 }
@@ -96,11 +98,20 @@ vcmn_err(int ce, const char *fmt, va_list ap)
 	case CE_PANIC:
 		printk(KERN_EMERG "PANIC: %s\n", msg);
 		spl_dumpstack();
+		/* Halt the thread to facilitate further debugging */
+		set_task_state(current, TASK_UNINTERRUPTIBLE);
+		panic("PANIC: %s\n", msg);
+
+		#if 0
+		printk(KERN_EMERG "PANIC: %s\n", msg);
+		spl_dumpstack();
 
 		/* Halt the thread to facilitate further debugging */
 		set_task_state(current, TASK_UNINTERRUPTIBLE);
 		while (1)
 			schedule();
+		#endif
+		break;
 	}
 } /* vcmn_err() */
 EXPORT_SYMBOL(vcmn_err);

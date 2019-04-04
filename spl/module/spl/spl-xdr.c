@@ -186,6 +186,11 @@ xdrmem_enc_bytes(XDR *xdrs, caddr_t cp, const uint_t cnt)
 	if (xdrs->x_addr_end - xdrs->x_addr < size)
 		return FALSE;
 
+	if(cp==	NULL || xdrs->x_addr==NULL){
+		dump_stack();
+		printk(KERN_WARNING "cp=%p x_addr=%p\n",cp,xdrs->x_addr);
+		return FALSE;
+	}
 	memcpy(xdrs->x_addr, cp, cnt);
 
 	xdrs->x_addr += cnt;

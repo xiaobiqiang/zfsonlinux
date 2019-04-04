@@ -34,6 +34,11 @@ typedef struct cred cred_t;
 #define	kcred		((cred_t *)(init_task.cred))
 #define	CRED()		((cred_t *)current_cred())
 
+/* Linux 4.9 API change, GROUP_AT was removed */
+#ifndef GROUP_AT
+#define	GROUP_AT(gi, i)	((gi)->gid[i])
+#endif
+
 #ifdef HAVE_KUIDGID_T
 
 /*
@@ -77,5 +82,12 @@ extern gid_t crgetfsgid(const cred_t *cr);
 extern int crgetngroups(const cred_t *cr);
 extern gid_t * crgetgroups(const cred_t *cr);
 extern int groupmember(gid_t gid, const cred_t *cr);
+
+extern uint_t crgetref(const cred_t *cr);
+extern int crsetresuid(cred_t *cr, uid_t r, uid_t e, uid_t s);
+extern int crsetresgid(cred_t *cr, gid_t r, gid_t e, gid_t s);
+extern int gidcmp(const void *v1, const void *v2);
+extern int crsetgroups(cred_t *cr, int n, gid_t *grp);
+extern int crsetugid(cred_t *cr, uid_t uid, gid_t gid);
 
 #endif  /* _SPL_CRED_H */

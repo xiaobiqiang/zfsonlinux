@@ -1,10 +1,10 @@
 src = @abs_top_srcdir@/module/vmpt_trsp
 obj = @abs_builddir@
 
-MODULE := vmpt_mac
+MODULE := vmpt_trsp
 
 EXTRA_CFLAGS = $(ZFS_MODULE_CFLAGS) @KERNELCPPFLAGS@
 
 obj-$(CONFIG_ZFS) := $(MODULE).o
 
-$(MODULE)-objs += vmpt_target_mac.o
+$(MODULE)-objs += vmpt_trsp.o

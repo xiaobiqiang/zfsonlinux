@@ -54,7 +54,8 @@ static const int hz = HZ;
 static inline void
 gethrestime(timestruc_t *now)
 {
-	*now = current_kernel_time();
+	/* *now = current_kernel_time(); */
+	getrawmonotonic(now);
 }
 
 static inline time_t

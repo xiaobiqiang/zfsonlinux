@@ -103,4 +103,22 @@ typedef struct xuio {
 #define XUIO_XUZC_PRIV(xuio)	xuio->xu_ext.xu_zc.xu_zc_priv
 #define XUIO_XUZC_RW(xuio)	xuio->xu_ext.xu_zc.xu_zc_rw
 
+/*
+ * uio_extflg: extended flags
+ *
+ * NOTE: This flag will be used in uiomove to determine if non-temporal
+ * access, ie, access bypassing caches, should be used.  Filesystems that
+ * don't initialize this field could experience suboptimal performance due to
+ * the random data the field contains.
+ *
+ * NOTE: This flag is also used by uioasync callers to pass an extended
+ * uio_t (uioa_t), to uioasync enabled consumers. Unlike above all
+ * consumers of a uioa_t require the uio_extflg to be initialized.
+ */
+#define	UIO_COPY_DEFAULT	0x0000	/* no special options to copy */
+#define	UIO_COPY_CACHED		0x0001	/* copy should not bypass caches */
+
+#define	UIO_ASYNC		0x0002	/* uio_t is really a uioa_t */
+#define	UIO_XUIO		0x0004	/* Structure is xuio_t */
+
 #endif /* SPL_UIO_H */

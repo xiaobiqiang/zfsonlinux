@@ -31,8 +31,20 @@ struct dk_callback {
 	int dkc_flag;
 };
 
+typedef struct dkioc_free_s {
+	uint32_t df_flags;
+	uint32_t df_reserved;   /* For easy 64-bit alignment below... */
+	diskaddr_t df_start;
+	diskaddr_t df_length;
+} dkioc_free_t;
+
+#define	DF_WAIT_SYNC	0x00000001	/* Wait for full write-out of free. */
+
 #define	DKIOC			(0x04 << 8)
 #define	DKIOCFLUSHWRITECACHE	(DKIOC | 34)
 #define	DKIOCTRIM		(DKIOC | 35)
+#define	DKIOCGETWCE		(DKIOC | 36)	/* Get current write cache */
+#define	DKIOCSETWCE		(DKIOC | 37)	/* Enable/Disable write cache */
+#define	DKIOCFREE		(DKIOC | 50)	/* free space (e.g. SCSI UNMAP) off a disk */
 
 #endif /* _SPL_DKIO_H */

@@ -25,4 +25,13 @@
 #ifndef _SPL_ERRNO_H
 #define _SPL_ERRNO_H
 
+#include <linux/errno.h>
+
+/* SUN Network File System */
+//#define	ESTALE		151	/* Stale NFS file handle */
+//#define	ETOOSMALL	152	/* Spare is smaller than data disk */
+/* Prodigy ClusterFS */
+#define	EGHOLD		1001	/* Can't not group hold */
+#define	EOFFLINE	1002	/* Node offline */
+
 #endif /* SPL_ERRNO_H */

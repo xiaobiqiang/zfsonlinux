@@ -131,7 +131,59 @@
 #define _BIG_ENDIAN
 #define _SUNOS_VTOC_16
 
-#else /* Currently x86_64, i386, arm, powerpc, and sparc are supported */
+/* s390 arch specific defines */
+#elif defined(__s390__)
+#if defined(__s390x__)
+#if !defined(_LP64)
+#define	_LP64
+#endif
+#else
+#if !defined(_ILP32)
+#define	_ILP32
+#endif
+#endif
+
+#define	_BIG_ENDIAN
+
+/* MIPS arch specific defines */
+#elif defined(__mips__)
+
+#if defined(__MIPSEB__)
+#define	_BIG_ENDIAN
+#elif defined(__MIPSEL__)
+#define	_LITTLE_ENDIAN
+#else
+#error MIPS no endian specified
+#endif
+
+#ifndef _LP64
+#define	_ILP32
+#endif
+
+#define	_SUNOS_VTOC_16
+
+/* sw_64 arch specific defines */
+#elif defined(__sw_64) || defined(__sw_64__)
+
+#if !defined(__sw_64)
+#define	__sw_64
+#endif
+
+#if !defined(_LITTLE_ENDIAN)
+#define	_LITTLE_ENDIAN
+#endif
+
+#if !defined(_LP64)
+#define	_LP64
+#endif
+
+#define	_SUNOS_VTOC_16
+
+#else
+/*
+ * Currently supported:
+ * x86_64, i386, arm, powerpc, s390, sparc, and mips
+ */
 #error "Unsupported ISA type"
 #endif
 
@@ -144,6 +196,14 @@
 #endif
 
 #include <sys/byteorder.h>
+
+/*
+ * CONFIG_HAVE_EFFICIENT_UNALIGNED_ACCESS will be defined by the Linux
+ * kernel for architectures which support efficient unaligned access.
+ */
+#if defined(CONFIG_HAVE_EFFICIENT_UNALIGNED_ACCESS)
+#define HAVE_EFFICIENT_UNALIGNED_ACCESS
+#endif
 
 #if defined(__LITTLE_ENDIAN) && !defined(_LITTLE_ENDIAN)
 #define _LITTLE_ENDIAN __LITTLE_ENDIAN

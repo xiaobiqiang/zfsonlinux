@@ -1,4 +1,6 @@
-Version:
-spl: 0.6.5.5
-zfs: 0.6.5.5
-linux: 4.4.15
+spl version:0.6.5.9
+zfs version:0.6.5.9
+linux version:3.10.0-514.el7.centos.x86_64
+
+spl:ceresdata_zfsonlinux_sw
+zfs:orignal zfsonlinux

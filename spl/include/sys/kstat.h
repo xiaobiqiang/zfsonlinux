@@ -144,6 +144,7 @@ typedef struct kstat_named_s {
         } value;
 } kstat_named_t;
 
+#define	KSTAT_NAMED_PTR(kptr)	((kstat_named_t *)(kptr)->ks_data)
 #define KSTAT_NAMED_STR_PTR(knptr) ((knptr)->value.string.addr.ptr)
 #define KSTAT_NAMED_STR_BUFLEN(knptr) ((knptr)->value.string.len)
 
@@ -176,6 +177,8 @@ typedef struct kstat_timer {
         hrtime_t     stop_time;            /* previous event stop time */
 } kstat_timer_t;
 
+#define	KSTAT_IO_PTR(kptr)	((kstat_io_t *)(kptr)->ks_data)
+
 int spl_kstat_init(void);
 void spl_kstat_fini(void);
 
@@ -193,6 +196,14 @@ extern void kstat_waitq_enter(kstat_io_t *);
 extern void kstat_waitq_exit(kstat_io_t *);
 extern void kstat_runq_enter(kstat_io_t *);
 extern void kstat_runq_exit(kstat_io_t *);
+
+extern void kstat_waitq_to_runq(kstat_io_t *kiop);
+extern void kstat_runq_back_to_waitq(kstat_io_t *kiop);
+
+extern void kstat_named_setstr(kstat_named_t *knp, const char *src);
+extern void kstat_set_string(char *dst, const char *src);
+extern void kstat_named_init(kstat_named_t *knp, const char *name,
+	uchar_t data_type);
 
 #define kstat_set_raw_ops(k,h,d,a)	__kstat_set_raw_ops(k,h,d,a)
 #define kstat_create(m,i,n,c,t,s,f)	__kstat_create(m,i,n,c,t,s,f)

@@ -30,7 +30,8 @@
  */
 enum xdr_op {
 	XDR_ENCODE,
-	XDR_DECODE
+	XDR_DECODE,
+	XDR_FREE
 };
 
 struct xdr_ops;
@@ -41,6 +42,7 @@ typedef struct {
 	caddr_t         x_addr;     /* Current buffer addr */
 	caddr_t         x_addr_end; /* End of the buffer */
 	enum xdr_op     x_op;       /* Stream direction */
+	int				x_handy;	/* extra private word */
 } XDR;
 
 typedef bool_t (*xdrproc_t)(XDR *xdrs, void *ptr);
@@ -70,6 +72,21 @@ struct xdr_bytesrec {
 };
 
 /*
+ * These are the request arguments to XDR_CONTROL.
+ *
+ * XDR_PEEK - returns the contents of the next XDR unit on the XDR stream.
+ * XDR_SKIPBYTES - skips the next N bytes in the XDR stream.
+ * XDR_RDMAGET - for xdr implementation over RDMA, gets private flags from
+ *		 the XDR stream being moved over RDMA
+ * XDR_RDMANOCHUNK - for xdr implementaion over RDMA, sets private flags in
+ *                   the XDR stream moving over RDMA.
+ */
+#define	XDR_PEEK	2
+#define	XDR_SKIPBYTES	3
+#define	XDR_RDMAGET	4
+#define	XDR_RDMASET	5
+
+/*
  * XDR functions.
  */
 void xdrmem_create(XDR *xdrs, const caddr_t addr, const uint_t size,
@@ -88,6 +105,11 @@ void xdrmem_create(XDR *xdrs, const caddr_t addr, const uint_t size,
  * must be possible to reference the functions' addresses by these names.
  */
 static inline bool_t xdr_char(XDR *xdrs, char *cp)
+{
+	return xdrs->x_ops->xdr_char(xdrs, cp);
+}
+
+static inline bool_t xdr_u_char(XDR *xdrs, uchar_t *cp)
 {
 	return xdrs->x_ops->xdr_char(xdrs, cp);
 }
@@ -151,5 +173,7 @@ static inline bool_t xdr_array(XDR *xdrs, caddr_t *arrp, uint_t *sizep,
 	return xdrs->x_ops->xdr_array(xdrs, arrp, sizep, maxsize, elsize,
 	    elproc);
 }
+
+extern unsigned int xdr_sizeof(xdrproc_t func, void *data);
 
 #endif /* SPL_RPC_XDR_H */

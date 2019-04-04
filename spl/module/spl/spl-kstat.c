@@ -115,6 +115,56 @@ kstat_runq_exit(kstat_io_t *kiop)
 }
 EXPORT_SYMBOL(kstat_runq_exit);
 
+void
+kstat_waitq_to_runq(kstat_io_t *kiop)
+{
+	hrtime_t new, delta;
+	ulong_t wcnt, rcnt;
+
+	new = gethrtime();
+
+	delta = new - kiop->wlastupdate;
+	kiop->wlastupdate = new;
+	wcnt = kiop->wcnt--;
+	ASSERT((int)wcnt > 0);
+	kiop->wlentime += delta * wcnt;
+	kiop->wtime += delta;
+
+	delta = new - kiop->rlastupdate;
+	kiop->rlastupdate = new;
+	rcnt = kiop->rcnt++;
+	if (rcnt != 0) {
+		kiop->rlentime += delta * rcnt;
+		kiop->rtime += delta;
+	}
+}
+EXPORT_SYMBOL(kstat_waitq_to_runq);
+
+void
+kstat_runq_back_to_waitq(kstat_io_t *kiop)
+{
+	hrtime_t new, delta;
+	ulong_t wcnt, rcnt;
+
+	new = gethrtime();
+
+	delta = new - kiop->rlastupdate;
+	kiop->rlastupdate = new;
+	rcnt = kiop->rcnt--;
+	ASSERT((int)rcnt > 0);
+	kiop->rlentime += delta * rcnt;
+	kiop->rtime += delta;
+
+	delta = new - kiop->wlastupdate;
+	kiop->wlastupdate = new;
+	wcnt = kiop->wcnt++;
+	if (wcnt != 0) {
+		kiop->wlentime += delta * wcnt;
+		kiop->wtime += delta;
+	}
+}
+EXPORT_SYMBOL(kstat_runq_back_to_waitq);
+
 static int
 kstat_seq_show_headers(struct seq_file *f)
 {
@@ -607,6 +657,46 @@ __kstat_create(const char *ks_module, int ks_instance, const char *ks_name,
 	return ksp;
 }
 EXPORT_SYMBOL(__kstat_create);
+
+/*
+ * Caller of this should ensure that the string pointed by src
+ * doesn't change while kstat's lock is held. Not doing so defeats
+ * kstat's snapshot strategy as explained in <sys/kstat.h>
+ */
+void
+kstat_named_setstr(kstat_named_t *knp, const char *src)
+{
+	if (knp->data_type != KSTAT_DATA_STRING)
+		panic("kstat_named_setstr('%p', '%p'): "
+		    "named kstat is not of type KSTAT_DATA_STRING",
+		    (void *)knp, (void *)src);
+
+	KSTAT_NAMED_STR_PTR(knp) = (char *)src;
+	if (src != NULL)
+		KSTAT_NAMED_STR_BUFLEN(knp) = strlen(src) + 1;
+	else
+		KSTAT_NAMED_STR_BUFLEN(knp) = 0;
+}
+EXPORT_SYMBOL(kstat_named_setstr);
+
+void
+kstat_set_string(char *dst, const char *src)
+{
+	bzero(dst, KSTAT_STRLEN);
+	(void) strncpy(dst, src, KSTAT_STRLEN - 1);
+}
+EXPORT_SYMBOL(kstat_set_string);
+
+void
+kstat_named_init(kstat_named_t *knp, const char *name, uchar_t data_type)
+{
+	kstat_set_string(knp->name, name);
+	knp->data_type = data_type;
+
+	if (data_type == KSTAT_DATA_STRING)
+		kstat_named_setstr(knp, NULL);
+}
+EXPORT_SYMBOL(kstat_named_init);
 
 void
 __kstat_install(kstat_t *ksp)

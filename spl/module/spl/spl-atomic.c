@@ -32,7 +32,8 @@
 
 #define DEBUG_SUBSYSTEM S_ATOMIC
 
-#ifdef ATOMIC_SPINLOCK
+/*#ifdef ATOMIC_SPINLOCK*/
+#if	1
 /* Global atomic lock declarations */
 DEFINE_SPINLOCK(atomic32_lock);
 DEFINE_SPINLOCK(atomic64_lock);

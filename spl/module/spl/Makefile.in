@@ -28,3 +28,7 @@ $(MODULE)-objs += spl-xdr.o
 $(MODULE)-objs += spl-cred.o
 $(MODULE)-objs += spl-tsd.o
 $(MODULE)-objs += spl-zlib.o
+$(MODULE)-objs += spl-modhash.o
+$(MODULE)-objs += spl-timer.o
+$(MODULE)-objs += spl-id_space.o
+$(MODULE)-objs += spl-xdr_sizeof.o

@@ -187,14 +187,25 @@ spl_kmem_alloc_impl(size_t size, int flags, int node)
 			if (flags & KM_VMEM) {
 				ptr = __vmalloc(size, lflags, PAGE_KERNEL);
 			} else {
+				printk(KERN_WARNING
+			    	"%s %d: alloc mem null "
+			    	"size=%lu flags=0x%x lflags=0x%x",
+			    	__func__, __LINE__, (unsigned long)size, flags, lflags);
 				return (NULL);
 			}
 		} else {
 			ptr = kmalloc_node(size, lflags, node);
 		}
 
-		if (likely(ptr) || (flags & KM_NOSLEEP))
+		if (likely(ptr) || (flags & KM_NOSLEEP)) {
+			if(ptr == NULL) {
+				printk(KERN_WARNING
+			    	"%s %d: alloc mem null "
+			    	"size=%lu flags=0x%x lflags=0x%x",
+			    	__func__, __LINE__, (unsigned long)size, flags, lflags);
+			}
 			return (ptr);
+		}	
 
 		/*
 		 * For vmem_alloc() and vmem_zalloc() callers retry immediately
@@ -208,8 +219,8 @@ spl_kmem_alloc_impl(size_t size, int flags, int node)
 		if (unlikely(__ratelimit(&kmem_alloc_ratelimit_state))) {
 			printk(KERN_WARNING
 			    "Possible memory allocation deadlock: "
-			    "size=%lu lflags=0x%x",
-			    (unsigned long)size, lflags);
+			    "size=%lu flags=0x%x lflags=0x%x",
+			    (unsigned long)size, flags, lflags);
 			dump_stack();
 		}
 
@@ -220,6 +231,10 @@ spl_kmem_alloc_impl(size_t size, int flags, int node)
 		cond_resched();
 	} while (1);
 
+	printk(KERN_WARNING
+			    "%s %d: alloc mem null "
+			    "size=%lu flags=0x%x lflags=0x%x",
+			    __func__, __LINE__, (unsigned long)size, flags, lflags);
 	return (NULL);
 }
 
@@ -382,6 +397,10 @@ inline void
 spl_kmem_free_track(const void *ptr, size_t size)
 {
 	kmem_debug_t *dptr;
+
+	/* Ignore NULL pointer since we haven't tracked it at all*/
+	if (ptr == NULL)
+		return;
 
 	/* Must exist in hash due to kmem_alloc() */
 	dptr = kmem_del_init(&kmem_lock, kmem_table, KMEM_HASH_BITS, ptr);
