@@ -101,8 +101,9 @@ DIST_COMMON = $(srcdir)/config/rpm.am $(srcdir)/config/deb.am \
 	$(top_srcdir)/module/vmpt_trsp/Makefile.in \
 	$(srcdir)/zfs-script-config.sh.in $(srcdir)/zfs.release.in \
 	$(am__extra_HEADERS_DIST) AUTHORS config/config.guess \
-	config/config.sub config/install-sh config/missing \
-	config/ltmain.sh $(top_srcdir)/config/config.guess \
+	config/config.sub config/depcomp config/install-sh \
+	config/missing config/ltmain.sh \
+	$(top_srcdir)/config/config.guess \
 	$(top_srcdir)/config/config.sub \
 	$(top_srcdir)/config/install-sh $(top_srcdir)/config/ltmain.sh \
 	$(top_srcdir)/config/missing

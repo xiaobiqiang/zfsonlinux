@@ -9,7 +9,6 @@
 #include <net/sock.h>
 #include <net/af_rxrpc.h>
 #include <linux/miscdevice.h>
-#include <sys/cluster_san.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
 #include <linux/errno.h>
