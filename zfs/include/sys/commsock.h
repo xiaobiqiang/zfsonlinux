@@ -2,6 +2,11 @@
 #define _LINUX_COMMSOCK_H
 
 #include <linux/net.h>
+#include <sys/modhash.h>
+#include <linux/uio.h>
+#include <sys/condvar.h>
+#include <sys/mutex.h>
+#include <linux/types.h>
 
 #define CS_CONF_STORE_PATH  "/etc/commsock.cache"
 
@@ -15,20 +20,25 @@
 #define CS_MSG_ADD_INFO     0x02
 #define CS_MSG_VMPT3SAS     0x0A
 
-#define CS_MAX_HOSTS        32
+#define CS_MAX_HOSTS        16
 #define CS_HOSTNAME_LEN		32
 #define CS_IP_LEN			16
 #define CS_HOST_MAX_LINK    4
 
 typedef struct commsock_conf {
+	mod_hash_key_t cc_key;
     int     cc_hostid;
     int     cc_port;
     char    cc_ipaddr[CS_IP_LEN];
+	struct completion cc_notify_recv;
 } commsock_conf_t;
 
 typedef struct commsock_rx_cb_arg {
+	struct list_head entry;
 	void 	*cd_session;
+	u32		cd_type;
 	void	*cd_cb_arg;
+	void	(*callack)(void *);
 	void 	*cd_data;
 	void    *cd_head;
 	size_t	 cd_dlen;
@@ -51,20 +61,29 @@ typedef enum commsock_ioc_cmd {
     COMMSOCK_IOC_EOF
 } commsock_ioc_cmd_e;
 
+typedef struct commsock_rx_worker {
+	struct list_head	task_wait;
+	struct list_head	task_xmit;
+	struct list_head	*ts_wait;
+	struct list_head	*ts_xmit;
+	struct task_struct 	*worker;
+	kmutex_t		worker_mtx;
+	kcondvar_t		worker_cv;
+	uint32_t		worker_flags;
+	uint32_t		worker_ntasks;
+	void			*worker_private;
+	uint32_t		worker_index;
+} commsock_rx_worker_t;
+
+#define COMMSOCK_LNK_WORKER	4
 typedef struct commsock_lnk {
 	mod_hash_key_t  cl_hash_key;
 	commsock_conf_t *cl_loc_host;
 	commsock_conf_t *cl_rem_host;
+	struct socket	*cl_sck;
 	int 			cl_state;
-	struct task_struct *cl_rcv_task[CS_HOST_MAX_LINK];
-	uint_t          cl_rcv_cnt;
-	struct socket   *cl_lnk_sck[CS_HOST_MAX_LINK];
-	struct socket   *cl_next_sck;
-	int             cl_next_idx;
-	uint_t          cl_lnk_cnt;
-	spinlock_t      cl_spinlock;
-	kmutex_t        cl_mutex;
-	krwlock_t       cl_rwlock;
+
+	commsock_rx_worker_t *cl_works[COMMSOCK_LNK_WORKER];
 } commsock_lnk_t;
 
 typedef enum commsock_lnk_state {

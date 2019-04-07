@@ -23,9 +23,9 @@
 #include <asm/device.h>
 #include <linux/device.h>
 #include <linux/cdev.h>
-#include <sys/zfs_context.h>
 #include <linux/string.h>
 #include <sys/nvpair.h>
+#include <sys/taskq.h>
 #include <linux/types.h>
 #include <linux/completion.h>
 #include <linux/wait.h>
@@ -33,54 +33,25 @@
 #include <sys/file.h>
 #include <net/tcp.h>
 #include <sys/commsock.h>
-#include <linux/mutex.h>
-#include <sys/kmem_cache.h>
+#include <linux/mempool.h>
 
 #define CS_MAGIC            0x12345678
 #define CS_HASH_TYPE_ID     0
 #define CS_HASH_TYPE_PTR    1
-#define CS_HASH_TYPE_STR    2
+#define CS_HASH_TYPE_STR    2      
 
-#define CS_MIN_SZ_SHIFT     9  
-#define CS_MIN_SZ           (1<<CS_MIN_SZ_SHIFT)   /* 512byte */
-#define CS_MAX_SZ_SHIFT     17 
-#define CS_MAX_SZ           (1<<CS_MAX_SZ_SHIFT)   /* 128K */
-#define CS_CACHE_NUM        
+#define CS_MAX_DATA (128<<10)
+#define CS_MAX_HEAD (2<<10)
 
-#define CSK_DATA_MIN_SHIFT  12
-#define CSK_DATA_MAX_SHIFT  17
-#define CSK_DATA_MIN        (1<<CSK_DATA_MIN_SHIFT)
-#define CSK_DATA_MAX        (1<<CSK_DATA_MAX_SHIFT)
-#define CSK_MEMPOOL_NUM      (CSK_DATA_MAX>>CSK_DATA_MIN_SHIFT+1)
+#define COMMSOCK_WORKER_ACTIVE	0x01
+#define COMMSOCK_WORKER_EXIT	0x02
 
 #define SET_ERROR(err)  ((err) > 0 ? -err : err)
-
-typedef enum commsock_wt_code {
-	CS_WT_CODE_SELFUP = 0x00,
-	CS_WT_CODE_ACCEPT = 0x01,
-	CS_WT_CODE_EOF
-} commsock_wt_code_e;
 
 typedef struct commsock_ioc {
     commsock_ioc_cmd_e cmd;
     int (*hdl)(nvlist_t *, nvlist_t **);
 } commsock_ioc_t;
-
-typedef struct commsock_tq {
-    taskq_t **ct_tqpptr;
-    char    *ct_name;
-    int     ct_pri;
-    int     ct_nthr;
-    int     ct_minalloc;
-    int     ct_maxalloc;
-    int     ct_flag;
-    int     ct_state;
-} commsock_tq_t;
-
-typedef struct commsock_wt {
-	commsock_wt_code_e	cw_type;
-	struct completion 	*cw_comp;
-} commsock_wt_t;
 
 typedef struct commsock_mod_hash {
     uint_t      cmp_type;
@@ -110,67 +81,25 @@ typedef struct commsock_cs_rx_cb_arg {
     void            *csrc_arg;
 } commsock_cs_rx_cb_arg_t;
 
-typedef struct commsock_snd_msg {
-    struct msghdr *css_mhdr;
-    struct kvec   *css_vec;
-} commsock_snd_msg_t;
-
-typedef struct commsock_snd_page {
-    struct page *pg;
-    size_t offset;
-    size_t len;
-} commsock_snd_page_t;
-
-typedef struct commsock_snd {
-    union {
-        commsock_snd_msg_t msg;
-        commsock_snd_page_t page;
-    } snd;
-#define smsg        snd.msg
-#define spg         snd.page
-#define smsg_hdr    snd.msg.css_mhdr
-#define smsg_vec    snd.msg.css_vec
-#define spg_page    snd.page.pg
-#define spg_off     snd.page.offset
-#define spg_len     snd.page.len
-
-    boolean_t      css_is_page;
-    size_t         css_len; /* all len */
-    boolean_t      css_flag;
-    size_t         css_cnt; /* please always 1 */
-} commsock_snd_t;
-
-typedef struct commsock_rcv_arg {
-    commsock_lnk_t *lnk;
-    struct socket *sock;
-} commsock_rcv_arg_t;
-
-typedef struct commsock_accpt_arg {
-    struct socket *sock;
-    int idx;
-} commsock_accpt_arg_t;
+typedef struct {
+	u32 type;
+	void *msg;
+	u32 len;
+} commsock_brdcast_arg_t;
 
 typedef struct commsock_stat {
     commsock_conf_t cs_loc_host;
-	struct socket	*cs_socket[CS_HOST_MAX_LINK];
 	
-    kmutex_t    	cs_gbmutex;
+//    kmutex_t    	cs_gbmutex;
 
     mod_hash_t      *cs_lnk_snd;
     mod_hash_t      *cs_lnk_rcv;
 	mod_hash_t		*cs_rx_cb;
 	mod_hash_t      *cs_hosts;
-	
-	/* notify completion var */
-	struct completion cs_selfup_cmp; 
-	struct completion cs_accpt_cmp; 
 
-    
-	struct task_struct *cs_thr_accept[CS_HOST_MAX_LINK];
-
-	taskq_t *rcv_tq;
-	struct workqueue_struct *xprt_wq;
 	struct socket *sock;
+	
+	taskq_t *rcv_tq;
 	struct task_struct *accpt_wkt;
 
 	struct kmem_cache *rcv_mm_cache;
@@ -178,16 +107,8 @@ typedef struct commsock_stat {
 	struct kmem_cache *rcv_hd_cache;
 	mempool_t *rcv_hd_pool;
 	
-    /* accept peer */
-    taskq_t   *cs_tq_accpt;
-    /* recv data */
-    taskq_t   *cs_tq_recv;
-    /* send data */
-    taskq_t   *cs_tq_send;
     /* recv ctrl msg */
     taskq_t   *cs_tq_comm;
-    /* hdl ctrl msg */
-    taskq_t   *cs_tq_hdl;
 } commsock_stat_t;
 
 static boolean_t
@@ -195,9 +116,11 @@ commsock_check_attrs(commsock_conf_t *);
 static int
 commsock_stat_init_socket(struct socket **);
 static void
-commsock_stat_release_socket(struct socket **sock);
+commsock_stat_release_socket(struct socket *sock);
 static int
 commsock_connect_host(commsock_conf_t *attr);
+static void
+commsock_destroy_lnk_worker(commsock_rx_worker_t *worker);
 static void
 commsock_lnk_hash_valdtor(mod_hash_val_t val);
 static void
@@ -217,25 +140,11 @@ commsock_ioc_get_tcp(nvlist_t *, nvlist_t **);
 
 static commsock_stat_t cs_stat;
 
-/* elements must be allocated by kmem_(z)alloc */
 static commsock_mod_hash_t cs_hash_vec[] = {
     {CS_HASH_TYPE_ID, &cs_stat.cs_lnk_snd, "cs_lnk_snd", CS_MAX_HOSTS, commsock_lnk_hash_valdtor, 0},
     {CS_HASH_TYPE_ID, &cs_stat.cs_lnk_rcv, "cs_lnk_rcv", CS_MAX_HOSTS, commsock_lnk_hash_valdtor, 0},
     {CS_HASH_TYPE_ID, &cs_stat.cs_rx_cb, "cs_rx_cb", CS_MAX_HOSTS, commsock_rx_cb_hash_valdtor, 0},
-    {CS_HASH_TYPE_STR, &cs_stat.cs_hosts, "cs_hosts", CS_MAX_HOSTS, commsock_hosts_hash_valdtor, 0},
-};
-
-static commsock_tq_t cs_taskq_vec[] = {
-    {&cs_stat.cs_tq_comm, "cs_tq_comm", minclsyspri, 1, 8, INT_MAX, TASKQ_PREPOPULATE},
-    {&cs_stat.cs_tq_hdl, "cs_tq_hdl", minclsyspri, 16, 8, INT_MAX, TASKQ_PREPOPULATE},
-    {&cs_stat.cs_tq_accpt, "cs_tq_accpt", minclsyspri, 1, 8, INT_MAX, TASKQ_PREPOPULATE},
-    {&cs_stat.cs_tq_send, "cs_tq_send", minclsyspri, 1, 8, INT_MAX, TASKQ_PREPOPULATE},
-    {&cs_stat.cs_tq_recv, "cs_tq_recv", minclsyspri, 1, 8, INT_MAX, TASKQ_PREPOPULATE}
-};
-
-static commsock_wt_t cs_wt_vec[] = {
-	{CS_WT_CODE_SELFUP,     &cs_stat.cs_selfup_cmp},
-	{CS_WT_CODE_ACCEPT,    &cs_stat.cs_accpt_cmp}
+    {CS_HASH_TYPE_ID, &cs_stat.cs_hosts, "cs_hosts", CS_MAX_HOSTS, commsock_hosts_hash_valdtor, 0},
 };
 
 static commsock_ioc_t cs_ioc_vec[] = {
@@ -261,13 +170,14 @@ static struct miscdevice commsock_dev = {
 static void
 commsock_lnk_hash_valdtor(mod_hash_val_t val)
 {
-    int i;
+	int i = 0;
     commsock_lnk_t *lnk = val;
     
-    for(i = 0; i < CS_HOST_MAX_LINK; i++) {
-        if(lnk->cl_lnk_sck[i])
-            sock_release(lnk->cl_lnk_sck[i]);
-    }
+    if(lnk->cl_sck)
+		sock_release(lnk->cl_sck);
+
+	for( ; i < COMMSOCK_LNK_WORKER; i++)
+		commsock_destroy_lnk_worker(lnk->cl_works[i]);
     kfree(lnk);
 }
 
@@ -564,38 +474,6 @@ commsock_deregister_rx_cb(uint_t type)
 }
 
 static void
-commsock_notify_finish(uint_t wt_code)
-{
-	if(wt_code >= CS_WT_CODE_EOF)
-	    return ;
-	complete(cs_wt_vec[wt_code].cw_comp);
-}
-
-static void 
-commsock_wait_for_finish(uint_t wt_code)
-{
-	if(wt_code >= CS_WT_CODE_EOF)
-	    return ;
-	wait_for_completion(cs_wt_vec[wt_code].cw_comp);
-}
-
-/* 
- * 0 if timedout
- * otherwise return remained time.
- */
-static int
-commsock_timedwait_for_finish(uint_t wt_code, unsigned long tmout)
-{
-	unsigned long tm;
-	struct completion *comp;
-	
-	if(wt_code >= CS_WT_CODE_EOF)
-	    return -1;
-	comp = cs_wt_vec[wt_code].cw_comp;
-	return wait_for_completion_timeout(comp, tmout);
-}
-
-static void
 commsock_free_cs_rx_cb_arg(commsock_cs_rx_cb_arg_t *arg)
 {
     if(arg->csrc_nvl)
@@ -606,11 +484,11 @@ commsock_free_cs_rx_cb_arg(commsock_cs_rx_cb_arg_t *arg)
 }
 
 void 
-commsock_free_rx_cb_arg(commsock_rx_cb_arg_t *arg)
+commsock_free_rx_cb_arg(commsock_rx_cb_arg_t *rx_data)
 {
-    cs_kmem_free(arg->cd_data, arg->cd_dlen);
-    cs_kmem_free(arg->cd_head, arg->cd_hlen);
-    kmem_cache_free(cs_stat.cs_rx_data_cache, arg);
+    if (rx_data->cd_data)
+		mempool_free(rx_data->cd_data, cs_stat.rcv_mm_pool);
+	mempool_free(rx_data, cs_stat.rcv_hd_pool);
 }
 
 /* ctrl msg send entry */
@@ -628,88 +506,6 @@ commsock_cs_send_msg(void *sess, void *msg, size_t len)
 	return (ret);
 }
 
-/*
-static int
-commsock_host_send_msg_impl(
-    struct socket *sock, struct msghdr *hdr,
-    struct kvec *vec, size_t num, size_t size)
-{
-    int ret;
-    ret = kernel_sendmsg(sock, hdr, vec, num, size);
-    if(ret == -EAGAIN)
-        ret = 0;
-    return ret;
-}
-
-static int
-commsock_host_send_page_impl(
-    struct socket *sock, struct page *page, 
-    int offset, size_t size, int flags)
-{
-    int ret;
-    ret = kernel_sendpage(sock, page, offset, size, flags);
-    if(ret == -EAGAIN)
-        ret = 0;
-    return ret;
-}
-
-
-static ssize_t
-commsock_host_send_entire(commsock_lnk_t *sess, commsock_snd_t *snd)
-{
-    int ret;
-    size_t totlen = 0;
-    size_t snd_len = 0;
-    int flag = 0;
-    struct socket *sock = sess->cl_lnk_sck;
-    
-    totlen = snd->css_len;
-    VERIFY(snd->css_cnt == 1);
-    
-    while(1) {
-        if(snd->css_is_page) {
-            ret = commsock_host_send_page_impl(sock, snd->spg_page, 
-                snd->spg_off+snd_len, snd->spg_len-snd_len, 
-                snd->css_flag);
-            if(ret < 0)
-                break;
-            else if((snd_len += ret) < totlen)
-                continue;
-            ret = snd_len;
-            break;
-        } else {
-            snd->smsg_hdr->msg_flags = snd->css_flag;
-            ret = commsock_host_send_msg_impl(sock, snd->smsg_hdr, 
-                snd->smsg_vec, snd->css_cnt,snd->css_len);
-            if(ret < 0)
-                break;
-            else if((snd_len += ret) < totlen) {
-                snd->css_len = totlen-snd_len;
-                snd->smsg_vec->iov_base += ret;
-                snd->smsg_vec->iov_len -= ret;
-                continue;
-            }
-            ret = snd_len;
-            break;
-        }
-    }
-    return ret;
-}
-*/
-
-static struct socket *
-commsock_get_next_sndsck(commsock_lnk_t *lnk)
-{
-    struct socket *sock = NULL;
-    spin_lock(&lnk->cl_spinlock);
-    sock = lnk->cl_lnk_sck[lnk->cl_next_idx++];
-    if(lnk->cl_next_idx >= lnk->cl_lnk_cnt)
-        lnk->cl_next_idx = 0;
-    spin_unlock(&lnk->cl_spinlock);
-    return sock;
-}
-
-
 int commsock_host_send_msg(void *sess, uint_t type, 
     void *header, size_t hdsz, 
     struct kvec *data, size_t cnt, size_t dlen)
@@ -723,7 +519,7 @@ int commsock_host_send_msg(void *sess, uint_t type,
     struct kvec *vecp_org = NULL;
     commsock_msg_header_t mheader = {CS_MAGIC,type,dlen,hdsz};
     commsock_lnk_t *lnk = sess;
-    struct socket *sock = NULL;
+    struct socket *sock = lnk->cl_sck;
     
     if(!header && (!cnt || !dlen) ) {
         error = SET_ERROR(EINVAL);
@@ -762,12 +558,12 @@ commsock_broadcast_hash_walk_cb(
     mod_hash_key_t key, mod_hash_val_t *valp, void *priv)
 {
     int ret;
-    commsock_snd_t *snd = priv;
-    uint_t type = snd->css_cnt;
+    commsock_brdcast_arg_t *snd = priv;
     commsock_lnk_t *lnk = (commsock_lnk_t *)valp;
+	
     cmn_err(CE_NOTE, "%s:lnk->cl_hash_key:%p", __func__, lnk->cl_hash_key);
-    ret = commsock_host_send_msg(lnk, type, snd->smsg_vec->iov_base,
-        snd->smsg_vec->iov_len, NULL, 0, 0);
+    ret = commsock_host_send_msg(lnk, snd->type, snd->msg,
+        snd->len, NULL, 0, 0);
     printk(KERN_WARNING "%s: key:%d, ret:%d", __func__, (int)key, ret);
     return MH_WALK_CONTINUE;
 }
@@ -775,17 +571,13 @@ commsock_broadcast_hash_walk_cb(
 void
 commsock_broadcast_msg(uint_t type, void *header, size_t hdsz) 
 {
-    int ret;
-    struct kvec vec;
-    commsock_snd_t snd = {
-        .css_cnt = type,
-        .smsg_vec = &vec,
+    commsock_brdcast_arg_t arg = {
+		.type = type,
+		.msg = header,
+		.len = hdsz
     };
-    
-    vec.iov_base = header;
-    vec.iov_len = hdsz;
     mod_hash_walk(cs_stat.cs_lnk_snd, 
-        commsock_broadcast_hash_walk_cb, &snd);
+        commsock_broadcast_hash_walk_cb, &arg);
 }
 
 static int
@@ -820,7 +612,7 @@ commsock_brdcast_selfup(void)
     }
 
     (void)commsock_cs_send_msg(CS_BRDCAST_SESSION, packed, packlen);
-    //commsock_wait_for_finish(CS_WT_CODE_SELFUP);
+
 	kmem_free(packed, packlen);
 free_nvl:
     nvlist_free(nvlp);
@@ -870,7 +662,8 @@ commsock_add_host(nvlist_t *nvl)
     int error = -1;
     commsock_conf_t *conf;
     char *ipaddr = NULL;
-    
+    __be32 addr = 0;
+	
     conf = kmem_zalloc(sizeof(*conf), KM_SLEEP);
     if( !conf || ((error=nvlist_lookup_string(nvl, CS_ATTR_IPADDR, &ipaddr)) != 0) ||
         ((error=nvlist_lookup_int32(nvl, CS_ATTR_PORT, &conf->cc_port)) != 0) ||
@@ -882,12 +675,15 @@ commsock_add_host(nvlist_t *nvl)
     printk(KERN_ERR "%s:cs_host:%p,hostid:%d,error:%d", __func__, 
         cs_stat.cs_hosts, conf->cc_hostid, error);
 
+	inet_pton(conf->cc_ipaddr, &addr);
+	init_completion(&conf->cc_notify_recv);
+	conf->cc_key = (mod_hash_key_t)addr;
+	
     error = mod_hash_insert(cs_stat.cs_hosts, 
-        (mod_hash_key_t)(conf->cc_ipaddr), 
-        (mod_hash_val_t)conf);
+        conf->cc_key, (mod_hash_val_t)conf);
     if(error != 0) {
         if(error == MH_ERR_DUPLICATE) { 
-            printk(KERN_ERR "%s:has same key:%d", __func__, conf->cc_hostid);
+            printk(KERN_ERR "%s:has same key:%02x", __func__, conf->cc_key);
             error = SET_ERROR(EEXIST);
         } else {
             printk(KERN_ERR "%s:unknown error[%d] to insert host[%d]", 
@@ -895,9 +691,11 @@ commsock_add_host(nvlist_t *nvl)
         }
         goto free_conf;
     }
+
     printk(KERN_ERR "%s:add_host succeed,hostid:%d,ipaddr:%s", 
         __func__, conf->cc_hostid, conf->cc_ipaddr);
     return conf;
+	
 free_conf:
     if(conf)
         kmem_free(conf, sizeof(*conf));
@@ -1046,170 +844,134 @@ commsock_connect_host(commsock_conf_t *attr)
     int i = 0;
     int err;
     int opt = 1;
-    int32_t sockbuf = 5*1024*1024;
-    int hostid = attr->cc_hostid;
-    struct socket *sock[CS_HOST_MAX_LINK];
+    int32_t sockbuf = 2*1024*1024;
+    mod_hash_key_t key = attr->cc_key;
+    struct socket *sock = NULL;
     commsock_lnk_t *lnk = NULL;
     struct sockaddr_in sockaddr;
     struct sockaddr_in cliaddr;
     
     if(mod_hash_find(cs_stat.cs_lnk_snd, 
-        (mod_hash_key_t)hostid, &lnk) == 0) {
-        printk(KERN_ERR "%s:mod_hash_find the same,hostid:%d", 
-            __func__, hostid);
+        (mod_hash_key_t)key, &lnk) == 0) {
+        printk(KERN_ERR "%s:mod_hash_find the same,hostid:%02x", 
+            __func__, key);
         goto error;
     }
-    
-    lnk = kzalloc(sizeof(*lnk), GFP_KERNEL);  
-    mutex_init(&lnk->cl_mutex, NULL, MUTEX_DEFAULT, NULL); 
-    lnk->cl_lnk_cnt = 0;
-    lnk->cl_state = CS_LINK_ACTIVE;
-    lnk->cl_loc_host = &cs_stat.cs_loc_host;
-    lnk->cl_hash_key = hostid;
-    spin_lock_init(&lnk->cl_spinlock);
-    err = mod_hash_find(cs_stat.cs_hosts, 
-        (mod_hash_key_t)attr->cc_ipaddr, &lnk->cl_rem_host);
-    if(err != 0) {
-        printk(KERN_NOTICE "%s: cs_stat.cs_hosts don't contain host[ip:%s]",
-            __func__, attr->cc_ipaddr);
-        goto free_lnk;
-    }
 
-    bzero(&sock[0], sizeof(sock[0])*CS_HOST_MAX_LINK);
-    err = commsock_stat_init_socket(sock);
+    err = commsock_stat_init_socket(&sock);
     if(err != 0) {
         printk(KERN_ERR "%s:init_socket[hostid:%d] failed", 
             __func__, attr->cc_hostid);
         goto error;
     }
     printk(KERN_ERR "%s:commsock_stat_init_socket succeed", __func__);
-
-    for(i=0; i<CS_HOST_MAX_LINK; i++) {
-        memset(&cliaddr, 0, sizeof(cliaddr));
-    	cliaddr.sin_family = AF_INET;
-    	cliaddr.sin_port = htons(
-    	    cs_stat.cs_loc_host.cc_port+CS_HOST_MAX_LINK+i);
-        if(inet_pton(cs_stat.cs_loc_host.cc_ipaddr, 
-            &cliaddr.sin_addr.s_addr) == 0) {
-            printk(KERN_ERR "%s:localhost convert to network byteorder failed", __func__);
-            goto release_sock;
-        }
-        err = kernel_bind(sock[i], (struct sockaddr *)&cliaddr, sizeof(cliaddr));
-        if(err != 0) {
-            printk(KERN_ERR "%s:kernel_bind(ip:%s,port:%d) failed", 
-                __func__, cs_stat.cs_loc_host.cc_ipaddr, 
-                cs_stat.cs_loc_host.cc_port+CS_HOST_MAX_LINK+i);
-            goto release_sock;
-        }
-        memset(&sockaddr, 0, sizeof(sockaddr));
-    	sockaddr.sin_family = AF_INET;
-    	sockaddr.sin_port = htons(attr->cc_port+i);
-        if(inet_pton(attr->cc_ipaddr, &sockaddr.sin_addr.s_addr) == 0) {
-            printk(KERN_ERR "%s:convert to network byteorder failed", __func__);
-            goto release_sock;
-        }
-        err = kernel_connect(sock[i], (struct sockaddr *)&sockaddr, 
-            sizeof(sockaddr), O_NONBLOCK);
-    	if ((err != -EINPROGRESS) && (err != 0)) {
-            printk(KERN_ERR "%s:kernel_connect failed,error:%d", 
-                __func__, err);
-            goto release_sock;
-    	}
-    	lnk->cl_lnk_sck[lnk->cl_lnk_cnt++] = sock[i];
-    }
-
-    lnk->cl_next_sck = lnk->cl_lnk_sck[0];
-    lnk->cl_next_idx = 0;
-	printk(KERN_ERR "%s:kernel_connect is inprogress", __func__);
-
-    err = mod_hash_insert(cs_stat.cs_lnk_snd, lnk->cl_hash_key, lnk);
+	
+    memset(&cliaddr, 0, sizeof(cliaddr));
+	cliaddr.sin_family = AF_INET;
+	cliaddr.sin_port = htons(
+	    cs_stat.cs_loc_host.cc_port+1);
+    inet_pton(cs_stat.cs_loc_host.cc_ipaddr, 
+		&cliaddr.sin_addr.s_addr);
+    err = kernel_bind(sock, (struct sockaddr *)&cliaddr, sizeof(cliaddr));
     if(err != 0) {
-        printk(KERN_ERR "%s:mod_hash_insert hostid[%d] failed,error:%d", 
-            __func__, hostid, err);
-        goto free_lnk;
+        printk(KERN_ERR "%s:kernel_bind(ip:%s) failed", 
+            __func__, cs_stat.cs_loc_host.cc_ipaddr);
+        goto release_sock;
     }
-    
+	
+    memset(&sockaddr, 0, sizeof(sockaddr));
+	sockaddr.sin_family = AF_INET;
+	sockaddr.sin_port = htons(attr->cc_port);
+    inet_pton(attr->cc_ipaddr, &sockaddr.sin_addr.s_addr);
+
+    err = kernel_connect(sock, (struct sockaddr *)&sockaddr, 
+        sizeof(sockaddr), O_NONBLOCK);
+	if ((err != -EINPROGRESS) && (err != 0)) {
+        printk(KERN_ERR "%s:kernel_connect failed,error:%d", 
+            __func__, err);
+        goto release_sock;
+	}
+
+	lnk = commsock_insert_lnk(sock, (__be32)key, 1);
+	if(lnk == NULL) {
+		printk(KERN_WARNING "%s:insert snd link failed", __func__);
+		goto release_sock;
+	}
+
+	complete(attr->cc_notify_recv);
     printk(KERN_ERR "%s:mod_hash_insert snd_lnk succeed,ip:%s", 
         __func__, lnk->cl_rem_host->cc_ipaddr);
     return 0;
-    
-free_lnk:
-    kfree(lnk);
+
 release_sock:
-//    commsock_stat_release_socket(sock[0]);
+    sock_release(sock);
 error:
     return err;
 }
 
 static int
-commsock_recv(struct socket *sock, void *buf, size_t len)
+commsock_dispatch_rx_cb(
+	commsock_rx_worker_t *worker, commsock_rx_cb_arg_t *rx_data)
 {
-    int r;
-    int flag = MSG_DONTWAIT | MSG_NOSIGNAL;
-	struct msghdr	msg = {};
-	struct kvec		iov = {buf, len};
-
-	r = kernel_recvmsg(sock, &msg, &iov, 1, 
-				len, flag);
-    if(r == -EAGAIN)
-        r = 0;
-    return r;
+	mutex_enter(&worker->worker_mtx);
+	atomic_inc_32(&worker->worker_ntasks);
+	list_add_tail(rx_data, worker->ts_wait);	
+	if (worker->worker_ntasks == 1) {
+		cv_signal(&w->worker_cv);
+	}
+	mutex_exit(&w->worker_mtx);
+	return 0;
 }
 
 static int
 commsock_work_recv(void *arg)
 {
 	int 				ret;
-	struct socket 		*sock = arg;
-	struct sockaddr_in  peer_addr;
-	int                 addr_len = 0;
-	__be32              rem_host_addr;
+	commsock_lnk_t 		*lnk = arg;
+	struct socket 		*sock = lnk->cl_sck;
+	u64					worker_idx = 0;
+	commsock_rx_worker_t *worker = NULL;
+	commsock_lnk		*session = NULL;
 	struct msghdr 		msg = {NULL, 0};
 	struct kvec 		vec = {NULL, 0};
 	const size_t		 mdlen = sizeof(commsock_msg_header_t);
 	commsock_msg_header_t *msg_header = NULL;	
 	commsock_rx_cb_arg_t *dbuf = NULL;
-	void 				*buf = NULL;
-	commsock_rx_cb_t	*rx;
+	commsock_rx_cb_t	*rx = NULL;
 	void 				(*taskq_fn)(void *);
 
-	if ((error=kernel_getpeername(
-	    sock, &peer_addr, &addr_len)) != 0) {
-    	pr_info("%s:kernel getpeername failed,error:%d."
-    	    "recv thread is going to exit.", 
-    		__func__, error);
-    	sock_release(sock);
+	/* wait for local host connect to remote host */
+	wait_for_completion(&lnk->cl_rem_host->cc_notify_recv);
+	if ( ((error=mod_hash_find(cs_stat.cs_lnk_snd, 
+	     	(mod_hash_key_t)lnk->cl_hash_key, 
+	     	&session)) != 0) ) {
+    	pr_warn("%s:can't find session,error:%d,"
+			"host ip:%s,recv thread is going to exit.", 
+    		__func__, error, lnk->cl_rem_host->cc_ipaddr);
     	return -EFAULT;
 	}
-	rem_host_addr = peer_addr.sin_addr.s_addr;
-/*
-	snprintf(ip, CS_IP_LEN, "%d.%d.%d.%d", 
-		(unsigned char)pr_addr.sa_data[2],
-        (unsigned char)pr_addr.sa_data[3],
-        (unsigned char)pr_addr.sa_data[4],
-        (unsigned char)pr_addr.sa_data[5]);
-    printk(KERN_NOTICE "%s: accept host[ip:%s]",
-        __func__, ip); */
-    
+
 	memset(&vec,0,sizeof(vec));  
     memset(&msg,0,sizeof(msg));  
 loop:
-	while (1) {
+	while (B_TRUE) {
 		dbuf = mempool_alloc(cs_stat.rcv_hd_pool, GFP_KERNEL);
+		dbuf->cd_session = session;
+		dbuf->cd_head = NULL;
+        dbuf->cd_hlen = 0;
+		dbuf->cd_data = NULL;
+        dbuf->cd_dlen = 0;
+		
 		msg_header = ((char *)dbuf) + sizeof(dbuf);
         vec.iov_base = msg_header;  
-        vec.iov_len = mdlen; 
-        
+        vec.iov_len = mdlen;        
         ret = kernel_recvmsg(sock ,&msg, &vec, 1, 
             mdlen, MSG_WAITALL); 
         if ((ret != mdlen) || (msg_header->cm_magic != CS_MAGIC)) {
             pr_warn("commsock received wrong msg header,exit.");
-            mempool_free(dbuf, cs_stat.rcv_hd_pool);
-            break;
+			goto free_hd;
         }
 
-        dbuf->cd_head = NULL;
-        dbuf->cd_hlen = 0;
         if (msg_header->cm_hdsz) {
             dbuf->cd_head = ((char *)msg_header) + mdlen;
             dbuf->cd_hlen = msg_header->cm_hdsz;
@@ -1219,13 +981,10 @@ loop:
                 msg_header->cm_hdsz, MSG_WAITALL); 
             if ((ret != msg_header->cm_hdsz) {
                 pr_warn("commsock received wrong header,exit.");
-                mempool_free(dbuf, cs_stat.rcv_hd_pool);
-                break;
+                goto free_hd;
             }
         }
 
-        dbuf->cd_data = NULL;
-        dbuf->cd_dlen = 0;
         if (msg_header->cm_dlen) {
             dbuf->cd_data = mempool_alloc(
                 cs_stat.rcv_mm_pool, GFP_KERNEL);
@@ -1236,48 +995,143 @@ loop:
                 msg_header->cm_dlen, MSG_WAITALL); 
             if ((ret != msg_header->cm_dlen) {
                 pr_warn("commsock received wrong data,exit.");
-                mempool_free(dbuf, cs_stat.rcv_hd_pool);
-                mempool_free(dbuf->cd_data, cs_stat.rcv_mm_pool);
-                break;
+                goto free_data;
             }
         }
 
-        /* TODO: find session */
-        
+		dbuf->cd_type = msg_header->cm_type;
+		worker = lnk->cl_works[(worker_idx++)%COMMSOCK_LNK_WORKER];
+		(void)commsock_dispatch_rx_cb(worker, dbuf);
+		continue;
+		
+free_data:
+		mempool_free(dbuf->cd_data, cs_stat.rcv_mm_pool);
+free_hd:
+        mempool_free(dbuf, cs_stat.rcv_hd_pool);
+jump_out:
+		break;
 	}
+	
 out:
 	return 0;
 } 
 
 static int
-commsock_start_recv(commsock_lnk_t *lnk, struct socket *sock)
+commsock_work_rx_handle(void *priv)
 {
-    int error = 0;
-    commsock_rcv_arg_t *rcv_arg = NULL;
-    
-    rcv_arg = kmalloc(sizeof(*rcv_arg), GFP_KERNEL);
-    if(!rcv_arg)
-        return -ENOMEM;
-    rcv_arg->lnk = lnk;
-    rcv_arg->sock = sock;
-    
-    mutex_enter(&lnk->cl_mutex);
-    lnk->cl_rcv_task[lnk->cl_rcv_cnt] = kthread_run(
-        commsock_work_recv, rcv_arg, "cs_recv_%d_%d", 
-        (int)lnk->cl_hash_key, lnk->cl_rcv_cnt);
-    if(!IS_ERR(lnk->cl_rcv_task[lnk->cl_rcv_cnt]))
-        lnk->cl_rcv_cnt++;
-    else
-        error = 1;
-    mutex_exit(&lnk->cl_mutex);
-    if(error) {
-        printk(KERN_WARNING, "%s:create recv[%d] thread failed",
-            __func__, (int)lnk->cl_hash_key);
-        kthread_stop(lnk->cl_rcv_task[lnk->cl_rcv_cnt]);
-        kfree(rcv_arg);
-    } 
-    return error;
+	int error;
+	struct list_head *tmp = NULL;
+	commsock_rx_cb_t *rx_cb = NULL;
+	commsock_rx_cb_arg_t *rx_data = NULL;
+	commsock_rx_worker_t *worker = priv;
+	
+	while (atomic_read(&worker->worker_flags) & 
+			COMMSOCK_WORKER_ACTIVE) {
+		mutex_enter(&worker->worker_mtx);
+		if (worker->worker_ntasks == 0)
+			cv_wait(&worker->worker_cv, &worker->worker_mtx);
+		
+		tmp = worker->ts_wait;
+		worker->ts_wait = worker->ts_xmit;
+		worker->ts_xmit = tmp;
+		mutex_unlock(&worker->worker_mtx);
+
+		while (!list_empty(worker->ts_xmit)) {
+			atomic_inc_32(&worker->worker_ntasks);
+			rx_data = list_first_entry(worker->ts_xmit, 
+				commsock_rx_cb_arg_t, entry);
+			
+			if ((error=mod_hash_find(cs_stat.cs_rx_cb, 
+				(mod_hash_key_t)rx_data->cd_type, &rx_cb)) != 0) {
+				rx_data->cd_cb_arg = rx_cb->crc_arg;
+				rx_data->callack = rx_cb->crc_rx_cb;
+				(rx_data->callack)(rx_data);
+			}
+		}
+	}
 }
+
+static int
+commsock_init_lnk_worker(commsock_rx_worker_t *worker, 
+	commsock_lnk_t *lnk, int idx, char *name)
+{
+	INIT_LIST_HEAD(&worker->task_wait);
+	INIT_LIST_HEAD(&worker->task_xmit);
+	worker->ts_wait = &worker->task_wait;
+	worker->ts_xmit = &worker->task_xmit;
+	mutex_init(&worker->worker_mtx, NULL, MUTEX_DRIVER, NULL);
+	cv_init(&worker->worker_cv, NULL, CV_DRIVER, NULL);
+	worker->worker_flags |= COMMSOCK_WORKER_ACTIVE;
+	worker->worker_index = idx;
+	worker->worker_ntasks = 0;
+	worker->worker_private = NULL;
+	worker->worker = kthread_run(commsock_work_rx_handle, worker, name);
+	if(IS_ERR(worker->worker))
+		return -EFAULT;
+	return 0;
+}
+
+static void
+commsock_destroy_lnk_worker(commsock_rx_worker_t *worker)
+{
+	atomic_set(&worker->worker_flags, 
+		COMMSOCK_WORKER_EXIT);
+}
+
+static commsock_lnk_t *
+commsock_insert_lnk(struct socket *sock, __be32 addr, int action)
+{
+	int i, err;
+	int missed = 0;
+	char name[64] = {0};
+	commsock_rx_worker_t *start = NULL;
+	commsock_lnk_t *lnk = NULL;
+	mod_hash_t *hash_tb = 
+		(action ? cs_stat.cs_lnk_snd : cs_stat.cs_lnk_rcv);
+
+	VERIFY(mod_hash_find(hash_tb, 
+	    (mod_hash_key_t)addr, &lnk) == MH_ERR_NOTFOUND);
+	
+    if (((lnk = kzalloc(sizeof(*lnk)+
+			sizeof(commsock_rx_worker_t)*COMMSOCK_LNK_WORKER, 
+			GFP_KERNEL)) == NULL) ||
+		((err = mod_hash_find(cs_stat.cs_hosts, 
+			(mod_hash_key_t)addr, &lnk->cl_rem_host)) != 0)) {
+        goto error;
+    }
+
+	lnk->cl_sck = sock;
+	lnk->cl_loc_host = &cs_stat.cs_loc_host;
+	lnk->cl_state = CS_LINK_ACTIVE;
+    lnk->cl_hash_key = addr;
+    error = mod_hash_insert(hash_tb, lnk->cl_hash_key, lnk);
+    if (error != 0) {
+        goto error;
+    } 
+
+	start = (char *)lnk + sizeof(*lnk);
+	for (i = COMMSOCK_LNK_WORKER-1; i >= 0; i--) {
+		lnk->cl_works[i] = start + i;
+		snprintf(name, 64, "csk_wkr_%x_%d_%d", addr, action, i);
+		err = commsock_init_lnk_worker(lnk->cl_works[i], lnk, i, name);
+		if (err) {
+			if (i == COMMSOCK_LNK_WORKER-1)
+				goto remove_lnk;
+			else
+				lnk->cl_works[i] = lnk->cl_works[i+1];
+		}
+	}
+
+	return lnk;
+	
+remove_lnk:
+	(void)mod_hash_remove(hash_tb, (mod_hash_key_t)addr, &lnk);
+error:
+	if(lnk)
+		kfree(lnk);
+	return NULL;
+}
+
 
 static void 
 commsock_work_accept(void *arg)
@@ -1286,10 +1140,9 @@ commsock_work_accept(void *arg)
 	int opt = 1;
 	int32_t sockbuf = 2*1024*1024;
 	struct sockaddr_in sockaddr;
+	size_t pr_addr_len = 0;
 	struct socket *nwsock = NULL;
 	struct socket *selfsock = arg;
-	size_t pr_addr_len = 0;
-	struct sockaddr pr_addr;
 	char ip[CS_IP_LEN];
 	commsock_conf_t *rem_host = NULL;
 	commsock_lnk_t *lnk = NULL;
@@ -1301,16 +1154,18 @@ commsock_work_accept(void *arg)
 	    &(sockaddr.sin_addr.s_addr)) != 1) {
         printk(KERN_ERR "%s:inet_pton failed,ip:%s", 
 		    __func__, cs_stat.cs_loc_host.cc_ipaddr);
+		sock_release(selfsock);
 		goto release_slf;
 	}
 	if( ((error=kernel_bind(selfsock, &sockaddr, sizeof(sockaddr))) < 0) ||
 	    ((error=kernel_listen(selfsock, CS_MAX_HOSTS)) != 0) ) {
 		printk(KERN_ERR "%s:kernel bind[port:%u] failed, error:%d", 
 		    __func__, cs_stat.cs_loc_host.cc_port, error);
+		sock_release(selfsock);
 		goto release_slf;
 	}
     		
-	printk(KERN_ERR "%s:ready to accept peer", __func__);
+	printk(KERN_INFO "%s:ready to accept peer", __func__);
 	while(!kthread_should_stop()) {
 	    struct inet_connection_sock *conn_sk = inet_csk(selfsock->sk);
 	    wait_event_interruptible(*sk_sleep(selfsock->sk), 
@@ -1323,17 +1178,28 @@ commsock_work_accept(void *arg)
 
 	    cmn_err(CE_NOTE, "%s:a peer is going to accept", __func__);
 		error=kernel_accept(selfsock, &nwsock, O_NONBLOCK);
-		if(error == -EAGAIN) {
+		if (error == -EAGAIN) {
 			goto cont;
 		} else if(error != 0) {
             cmn_err(CE_NOTE, "%s: accept failed[%d]",
                 __func__, error);
             goto cont;
 		}
-        printk(KERN_ERR "%s:have accepted a peer", __func__);
+        printk(KERN_INFO "%s:have accepted a peer", __func__);
+
+		bzero(&sockaddr, sizeof(sockaddr));
+		if (((error = kernel_getpeername(
+				nwsock, &sockaddr, &pr_addr_len)) != 0) || 
+			((lnk = commsock_insert_lnk(nwsock, 0)) == NULL)) {
+			printk(KERN_WARNING "%s:insert receive[%x] link failed",
+				__func__, sockaddr.sin_addr.s_addr);
+			goto release_nwsck;
+		}
+		printk(KERN_INFO "%s:accept host ip:%s", 
+		    __func__, lnk->cl_rem_host->cc_ipaddr);
 
         taskq_dispatch(cs_stat.rcv_tq, 
-            commsock_work_recv, nwsock, TQ_SLEEP);
+            commsock_work_recv, lnk, TQ_SLEEP);
 		continue;
 		
 release_nwsck:
@@ -1341,8 +1207,6 @@ release_nwsck:
 cont:
     continue;
 	}
-release_slf:
-    sock_release(selfsock);
 out:
     printk(KERN_ERR "%s: accept thread is going to exit", __func__);
 }
@@ -1364,9 +1228,6 @@ commsock_start_accpt(void)
     }
 
     return 0;
-    
-destroy_thread:
-	return error;
 }
 
 static int 
@@ -1495,56 +1356,10 @@ out:
 }
 
 static void
-commsock_stat_release_socket(struct socket **sock)
+commsock_stat_release_socket(struct socket *sock)
 {
-    int i = 0;
-    for(i = 0; i < CS_HOST_MAX_LINK; i++,sock++)
-        sock_release(*sock);
-}
-
-static void 
-commsock_stat_destroy_taskq(void)
-{
-    int i = 0;
-    commsock_tq_t *cs_tq;
-    taskq_t *tq;
-    
-    for( ; i < sizeof(cs_taskq_vec)/sizeof(commsock_tq_t); i++) {
-        cs_tq = &cs_taskq_vec[i];
-        tq = *cs_tq->ct_tqpptr;
-        if(tq) {
-            taskq_destroy(tq);
-        }
-        cs_tq->ct_state &= ~TASKQ_ACTIVE;
-    }
-}
-
-static int
-commsock_stat_init_taskq(void)
-{
-    int i = 0, j = 0;
-    commsock_tq_t *cs_tq;
-    taskq_t *tq;
-    
-    for( ; i < sizeof(cs_taskq_vec)/sizeof(commsock_tq_t); i++) {
-        cs_tq = &cs_taskq_vec[i];
-        tq = taskq_create(cs_tq->ct_name, cs_tq->ct_nthr, cs_tq->ct_pri,
-            cs_tq->ct_minalloc, cs_tq->ct_maxalloc, cs_tq->ct_flag);
-        if(tq == NULL) {
-            printk(KERN_ERR "%s:create taskq[%s] failed", 
-                __func__, cs_tq->ct_name);
-            goto error;
-        }
-        cs_tq->ct_state |= TASKQ_ACTIVE;
-        *(cs_tq->ct_tqpptr) = tq;
-    }
-    return 0;
-error:
-    for( ; j < i; j++) {
-        cs_tq = &cs_taskq_vec[j];
-        taskq_destroy(*(cs_tq->ct_tqpptr));
-    }
-    return -1;
+    if(sock)
+		sock_release(sock);
 }
 
 static int
@@ -1598,104 +1413,10 @@ commsock_stat_destroy_hash(void)
     }
 }
 
-
-static void
-commsock_init_completion(void)
-{
-
-	int i=0;
-	int cnt = sizeof(cs_wt_vec)/sizeof(commsock_wt_t);
-	struct completion *comp;
-	
-	for( ; i<cnt; i++) {
-		comp = cs_wt_vec[i].cw_comp;
-		comp->done = 0;
-		init_waitqueue_head(&comp->wait);
-	}
-}
-
-static int
-commsock_stat_init_cache(commsock_stat_t *csp)
-{
-    csp->cs_rx_data_cache = kmem_cache_create(
-        "cs_rx_cache", sizeof(commsock_rx_cb_arg_t), 0, 
-        NULL, NULL, NULL, NULL, NULL, 0);
-    if(!csp->cs_rx_data_cache) {
-        printk(KERN_WARNING "%s:create cache failed",
-            __func__);
-        return -ENOMEM;
-    }
-    return 0;
-}
-
-static int
-commsock_init_stat(commsock_stat_t *csp)
-{
-    int error;
-
-    mutex_init(&csp->cs_gbmutex, NULL, MUTEX_DEFAULT, NULL);
-
-    /*
-     * we ignore error because we can init attrs
-     * with commsock_ioc_set_tcp
-     */
-    (void)commsock_stat_load_config(csp);
-    error = commsock_stat_init_cache(csp);
-	if((error=commsock_stat_init_socket(&csp->cs_socket)) != 0) {
-		printk(KERN_ERR "%s:commsock_stat_init_socket failed,error:%d", 
-				__func__, error);
-        goto out;
-	}
-	commsock_init_completion();
-	commsock_stat_init_hash();
-    error = commsock_stat_init_taskq();
-    if(error != 0) {
-        printk(KERN_ERR "%s:commsock_stat_init_taskq failed", __func__);
-        goto release_sock;
-    }
-    return 0;
-release_sock:
-    commsock_stat_release_socket(csp->cs_socket);
-out:
-    return error;
-}
-
-#define CS_MAX_DATA (128<<10)
-#define CS_MAX_HEAD (2<<10)
 static int __init commsock_init(void)
 {
     int i = 0;
-    cs_stat.rcv_tq = taskq_create("commsock_rcv_wq", 
-        CS_MAX_HOSTS, maxclsyspri, 8, MAX_INT, TASKQ_PREPOPULATE);
-    if(!cs_stat.rcv_tq)
-        return -ENOMEM; 
-    cs_stat.xprt_wq = alloc_workqueue("commsock_xprt_wq", 
-        WQ_MEM_RECLAIM|WQ_HIGHPRI, 0);
-    if(!cs_stat.xprt_wq) {
-        destroy_workqueue(cs_stat.rcv_wq);
-        return -ENOMEM;
-    }
-
-    cs_stat.rcv_mm_cache = kmem_cache_create("csk_rcv_cache",
-        CS_MAX_DATA, 512, SLAB_HWCACHE_ALIGN, NULL);
-    cs_stat.rcv_mm_pool = 
-        mempool_create_slab_pool(128, cs_stat.rcv_mm_cache);
-
-    cs_stat.rcv_hd_cache = kmem_cache_create("csk_hd_cache",
-        CS_MAX_HEAD, 0, SLAB_HWCACHE_ALIGN, NULL);
-    cs_stat.rcv_hd_pool = 
-        mempool_create_slab_pool(128, cs_stat.rcv_hd_cache);
-
-    commsock_stat_init_socket(&cs_stat.sock);
-    commsock_stat_load_config(&cs_stat);
-    if(commsock_check_attrs(&cs_stat.cs_loc_host))
-        commsock_start_accpt();
-    else 
-        printk(KERN_INFO "need to config");
-    return 0;
-    
-/*
-    int error;
+	int error;
     
     printk(KERN_INFO "commsock module start loading");
 
@@ -1705,80 +1426,107 @@ static int __init commsock_init(void)
         goto out;
     }
 
-    error = csh_rx_hook_add(CLUSTER_SAN_MSGTYPE_COMMSOCK, 
+	(void)commsock_stat_init_socket(&cs_stat.sock);
+	(void)commsock_stat_init_hash();
+	
+	cs_stat.cs_tq_comm = taskq_create("csk_tq_common", 4, 
+		minclsyspri, 1, INT_MAX, TASKQ_PREPOPULATE);
+	if(!cs_stat.cs_tq_comm) {
+		printk(KERN_WARNING "%s:create cs_tq_comm failed", __func__);
+		goto destroy_hash;
+	}
+	
+    error = commsock_stat_load_config(&cs_stat);
+	if(error && error != -ENOENT) {
+		printk(KERN_ERR "%s: load config file failed,err:%d",
+            __func__, error);
+        goto destroy_tq_comm;
+	}
+	
+    cs_stat.rcv_tq = taskq_create("commsock_rcv_tq", 
+        CS_MAX_HOSTS, maxclsyspri, 1, MAX_INT, TASKQ_PREPOPULATE);
+    if(!cs_stat.rcv_tq) {
+		printk(KERN_WARNING "%s:create receive taskq failed", __func__);
+		error = SET_ERROR(ENOMEM);
+        goto destroy_tq_comm; 
+    }
+
+    cs_stat.rcv_mm_cache = kmem_cache_create("csk_rcv_cache",
+        CS_MAX_DATA, 512, SLAB_HWCACHE_ALIGN, NULL);
+	cs_stat.rcv_hd_cache = kmem_cache_create("csk_hd_cache",
+        CS_MAX_HEAD, 0, SLAB_HWCACHE_ALIGN, NULL);
+	if(!cs_stat.rcv_mm_cache || !cs_stat.rcv_hd_cache) {
+		printk(KERN_WARNING "%s:create kmem_cache failed", __func__);
+		error = SET_ERROR(ENOMEM);
+        goto destroy_kmem_cache;
+	}
+	
+    cs_stat.rcv_mm_pool = 
+        mempool_create_slab_pool(128, cs_stat.rcv_mm_cache);    
+    cs_stat.rcv_hd_pool = 
+        mempool_create_slab_pool(128, cs_stat.rcv_hd_cache);
+	if(!cs_stat.rcv_mm_pool || !cs_stat.rcv_hd_pool) {
+		printk(KERN_WARNING "%s:create mem_pool failed", __func__);
+		error = SET_ERROR(ENOMEM);
+        goto destroy_mempool;
+	}
+	
+	error = csh_rx_hook_add(CLUSTER_SAN_MSGTYPE_COMMSOCK, 
         commsock_cs_rx_cb, NULL);
     if(error != 0) {
-        printk(KERN_ERR "%s:csh_rx_hook_add failed", __func__);
+        printk(KERN_WARNING"%s:csh_rx_hook_add failed", __func__);
         error= SET_ERROR(EEXIST);
-        goto deg_misc;
-    } 
-
-    error = commsock_init_stat(&cs_stat);
-    if(error != 0) {
-        printk(KERN_ERR "%s:commsock_init_stat failed", __func__);
-        error= SET_ERROR(EFAULT);
-        goto csh_remhk;
+        goto destroy_mempool;
     }
 
-    if(commsock_check_attrs(&cs_stat.cs_loc_host)) {
-        printk(KERN_INFO "%s:commsock ipaddr:%s, port:%d", 
-            __func__, cs_stat.cs_loc_host.cc_ipaddr, 
-            cs_stat.cs_loc_host.cc_port);
-
-		if((error=commsock_start_accpt()) != 0) {
-			printk(KERN_ERR "%s:commsock_start_accpt failed", __func__);
-            goto release_sock;
-		}
-		
-        if((error=commsock_brdcast_selfup()) != 0) {
-            printk(KERN_ERR "%s:commsock_brdcast_selfup failed", __func__);
-            goto release_sock;
-        }
-    } else {
-        printk(KERN_INFO "%s: config file has no attrs," 
-            "need to set tcp", __func__);
-    }
-	printk(KERN_INFO "commsock module has been loaded successfully!");
-        
+	if(commsock_check_attrs(&cs_stat.cs_loc_host))
+        commsock_start_accpt();
+		commsock_brdcast_selfup();
+    else 
+        printk(KERN_INFO "need to config");
+	
     return 0;
+	
+destroy_mempool:
+	if(cs_stat.rcv_mm_pool)
+		mempool_destroy(cs_stat.rcv_mm_pool);
+	if(cs_stat.rcv_hd_pool)
+		mempool_destroy(cs_stat.rcv_hd_pool);
+destroy_kmem_cache:
+	if(cs_stat.rcv_mm_cache)
+		kmem_cache_destroy(cs_stat.rcv_mm_cache);
+	if(cs_stat.rcv_hd_cache)
+		kmem_cache_destroy(cs_stat.rcv_hd_cache);
+desroy_rcv_tq:
+	taskq_destroy(cs_stat.rcv_tq);
+destroy_tq_comm:
+	taskq_destroy(cs_stat.cs_tq_comm);
+destroy_hash:
+	commsock_stat_destroy_hash();
 release_sock:
-    commsock_stat_release_socket(cs_stat.cs_socket);
-csh_remhk:
-    csh_rx_hook_remove(CLUSTER_SAN_MSGTYPE_COMMSOCK);
+	sock_release(cs_stat.sock);
 deg_misc:
-    misc_deregister(&commsock_dev);
+	misc_deregister(&commsock_dev);
 out:
-	printk(KERN_INFO "commsock module load failed!");
-    return error;
-    */
+	return error;
 }
 
 static void __exit commsock_exit(void)
 {
-    int i = 0;
     printk(KERN_INFO "%s:commsock module start uninstalled", __func__);
-/*
-    if(cs_stat.cs_thr_accept) {
-        for( ; i < CS_HOST_MAX_LINK; i++)
-            kthread_stop(cs_stat.cs_thr_accept[i]);
-    }
-    if(cs_stat.cs_thr_recv)
-        kthread_stop(cs_stat.cs_thr_recv);
-        */
-    if(commsock_stat_store_config() != 0) {
-        printk(KERN_WARNING "%s:commsock_stat_store_config failed", __func__);
-    }
-    
-	if(csh_rx_hook_remove(CLUSTER_SAN_MSGTYPE_COMMSOCK) != 0) {
-        printk(KERN_WARNING "%s:csh_rx_hook_remove %d failed", 
-            __func__, CLUSTER_SAN_MSGTYPE_COMMSOCK);
-    }
-    
-    commsock_stat_destroy_taskq();
-    commsock_stat_release_socket(cs_stat.cs_socket);
-    commsock_stat_destroy_hash();
-    kmem_cache_destroy(cs_stat.cs_rx_data_cache);
-    misc_deregister(&commsock_dev);
+
+	misc_deregister(&commsock_dev);
+	commsock_stat_store_config();
+	csh_rx_hook_remove(CLUSTER_SAN_MSGTYPE_COMMSOCK);
+	sock_release(cs_stat.sock);
+	commsock_stat_destroy_hash();
+	taskq_destroy(cs_stat.cs_tq_comm);
+	taskq_destroy(cs_stat.rcv_tq);
+	kmem_cache_destroy(cs_stat.rcv_hd_cache);
+	kmem_cache_destroy(cs_stat.rcv_mm_cache);
+	mempool_destroy(cs_stat.rcv_hd_pool);
+	mempool_destroy(cs_stat.rcv_mm_pool);
+
     printk(KERN_INFO "%s:commsock module uninstalled successfully!", __func__);
 }
 
